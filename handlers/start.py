@@ -6,6 +6,8 @@ from models import User
 from sqlalchemy import select
 from keyboards.age_kb import get_age_kb
 from keyboards.main_menu_kb import get_main_kb
+from keyboards.admin_kb import get_admin_help_kb
+from config import ADMIN_IDS
 
 router = Router()
 
@@ -32,6 +34,25 @@ async def command_start(message: Message):
                 "Выберите раздел:",
                 reply_markup=get_main_kb()
             )
+
+@router.message(Command("help"))
+async def command_help(message: Message):
+    is_admin = message.from_user.id in ADMIN_IDS
+    
+    help_text = (
+        "🤖 <b>Доступные команды:</b>\n\n"
+        "🔹 /start — Перезапустить бота\n"
+        "🔹 /help — Показать это сообщение\n"
+        "🔹 /cancel — Отменить действие\n"
+    )
+    
+    if is_admin:
+        help_text += "\n👑 <b>Панель администратора:</b>\nВыберите действие на кнопках ниже или используйте команды: /reply, /approve, /reject."
+        # Отправляем с кнопками для админа
+        await message.answer(help_text, reply_markup=get_admin_help_kb(), parse_mode="HTML")
+    else:
+        # Отправляем без кнопок для обычных юзеров
+        await message.answer(help_text, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("age_"))
 async def set_age_inline(callback: CallbackQuery):

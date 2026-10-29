@@ -14,6 +14,8 @@ from handlers.games import games_router
 from handlers.ambassador import router as ambassador_router
 from handlers.feedback import router as feedback_router
 
+from aiogram.types import BotCommand 
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -21,6 +23,10 @@ async def main():
     # 1. Создаём таблицы в БД
     await create_table()
     print("✅ Таблицы созданы/проверены")
+    
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Главное меню"),
+        BotCommand(command="help", description="Список команд и панель админа")])
     
     # 2. Подключаем все обработчики
     dp.include_router(sdg_router)

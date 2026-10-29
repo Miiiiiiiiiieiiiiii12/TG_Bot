@@ -10,12 +10,24 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("❌ DATABASE_URL не задан!")
 
+# Убираем sslmode из ссылки, так как asyncpg его не понимает
+if "?sslmode=require" in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("?sslmode=require", "")
+
 for prefix in ("postgresql+psycopg2://", "postgresql://", "postgres://"):
     if DATABASE_URL.startswith(prefix):
         DATABASE_URL = "postgresql+asyncpg://" + DATABASE_URL[len(prefix):]
         break
 
-engine = create_async_engine(DATABASE_URL)
+# Создаем асинхронный движок
+engine = create_async_engine(
+    DATABASE_URL,
+    connect_args={"ssl": "require"}, # Для Pterodactyl/внешних БД
+    pool_pre_ping=True,              # Проверка соединения перед использованием (решает твою ошибку)
+    pool_recycle=1800                # Пересоздание соединений раз в 30 минут
+)
+
+# Инициализируем сессии
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 async def get_db():

@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, BufferedInputFile 
 from aiogram.filters import Command, CommandObject
 from database import AsyncSessionLocal
 from models import Question, User, GameResult, QuizResult, Feedback, AmbassadorApplication, UserActivity
@@ -7,6 +7,8 @@ from config import ADMIN_IDS
 from sqlalchemy import select, func
 from datetime import datetime, timedelta
 from services.analytics import log_activity
+import csv, io, zipfile, html
+from keyboards.admin_kb import get_admin_help_kb 
 
 router = Router()
 
@@ -288,3 +290,137 @@ async def stats_popular(message: Message):
         for target_id, count in rows:
             text += f"ЦУР {target_id}: {count} просмотров\n"
         await message.answer(text, parse_mode="Markdown")
+
+        # ---------- ОБРАБОТЧИКИ КНОПОК ИЗ /help ----------
+
+def is_admin_cb(callback: CallbackQuery) -> bool:
+    return callback.from_user.id in ADMIN_IDS
+
+@router.callback_query(F.data == "admin_export_feedback", F.func(is_admin_cb))
+async def cb_export_feedback(callback: CallbackQuery):
+    await callback.message.edit_text("⏳ Готовлю файл отзывов...")
+    
+    async with AsyncSessionLocal() as session:
+        stmt = select(Feedback).order_by(Feedback.created_at.desc())
+        result = await session.execute(stmt)
+        feedbacks = result.scalars().all()
+    
+    if not feedbacks:
+        await callback.message.edit_text("📭 Нет данных для выгрузки", reply_markup=get_admin_help_kb())
+        return
+    
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=';')
+    writer.writerow(["id", "user_id", "sdg_id", "usefulness", "interest", "clarity", "comment", "created_at"])
+    for f in feedbacks:
+        writer.writerow([f.id, f.user_id, f.sdg_id, f.usefulness, f.interest, f.clarity, f.comment, f.created_at])
+    
+    file = BufferedInputFile(output.getvalue().encode('utf-8-sig'), filename="feedback.csv")
+    await callback.message.answer_document(file, caption="📊 Выгрузка обратной связи готова!")
+    await callback.message.edit_text("✅ Файл отправлен выше.", reply_markup=get_admin_help_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_export_db", F.func(is_admin_cb))
+async def cb_export_db(callback: CallbackQuery):
+    await callback.message.edit_text("⏳ Собираю базу данных в ZIP-архив. Это может занять пару секунд...")
+    
+    zip_buffer = io.BytesIO()
+    tables = [
+        (User, "users"), (Question, "questions"), (QuizResult, "quiz_results"),
+        (GameResult, "game_results"), (AmbassadorApplication, "ambassadors"),
+        (Feedback, "feedback"), (UserActivity, "user_activity")
+    ]
+    
+    async with AsyncSessionLocal() as session:
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            for model, filename in tables:
+                stmt = select(model)
+                result = await session.execute(stmt)
+                rows = result.scalars().all()
+                if not rows: continue
+                
+                columns = [c.name for c in model.__table__.columns]
+                csv_buffer = io.StringIO()
+                writer = csv.writer(csv_buffer, delimiter=';')
+                writer.writerow(columns)
+                
+                for row in rows:
+                    row_data = [getattr(row, col) for col in columns]
+                    writer.writerow(row_data)
+                
+                zip_file.writestr(f"{filename}.csv", csv_buffer.getvalue().encode('utf-8-sig'))
+    
+    zip_buffer.seek(0)
+    file = BufferedInputFile(zip_buffer.read(), filename="database_export.zip")
+    await callback.message.answer_document(file, caption="🗄 Полная выгрузка БД готова!")
+    await callback.message.edit_text("✅ Архив отправлен выше.", reply_markup=get_admin_help_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_show_apps", F.func(is_admin_cb))
+async def cb_show_apps(callback: CallbackQuery):
+    await list_applications(callback.message)
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_show_stats", F.func(is_admin_cb))
+async def cb_show_stats(callback: CallbackQuery):
+    await stats_activity(callback.message)
+    await callback.answer()
+
+   # ---------- СПИСОК НЕОТВЕЧЕННЫХ ВОПРОСОВ ----------
+
+async def show_pending_questions_list(message: Message):
+    try:
+        async with AsyncSessionLocal() as session:
+            stmt = select(Question).where(Question.status == 'pending').order_by(Question.created_at.asc())
+            result = await session.execute(stmt)
+            questions = result.scalars().all()
+
+        if not questions:
+            await message.answer("✅ <b>Отлично! Неотвеченных вопросов нет.</b>", parse_mode="HTML")
+            return
+
+        # Формируем заголовок
+        text = f"📋 <b>Вопросы без ответа ({len(questions)}):</b>\n\n"
+        
+        for q in questions:
+            # Безопасно экранируем ник и текст, чтобы < и > не ломали HTML
+            safe_name = html.escape(str(q.user_name))
+            short_text = q.text[:70] + "..." if len(q.text) > 70 else q.text
+            safe_text = html.escape(str(short_text))
+            
+            # Формируем блок для одного вопроса
+            block = (
+                f"❓ <b>#{q.id}</b> | От: {safe_name}\n"
+                f"📝 <i>{safe_text}</i>\n"
+                f"👉 Ответ: <code>/reply {q.id} [текст]</code>\n"
+                f"─────────────────\n"
+            )
+            
+            # Защита от лимита Telegram (4096 символов).
+            # Если текст становится слишком большим, отправляем текущий и начинаем новый.
+            if len(text) + len(block) > 4000:
+                await message.answer(text, parse_mode="HTML")
+                text = f"📋 <b>Продолжение списка ({len(questions)}):</b>\n\n"
+            
+            text += block
+
+        # Отправляем остаток
+        if text.strip():
+            await message.answer(text, parse_mode="HTML")
+
+    except Exception as e:
+        print(f"ОШИБКА ВЫВОДА ВОПРОСОВ: {e}")
+        await message.answer("❌ Произошла ошибка при загрузке списка вопросов.")
+
+# Текстовая команда на всякий случай
+@router.message(Command("pending"), F.func(is_admin))
+async def cmd_pending(message: Message):
+    await show_pending_questions_list(message)
+
+# Обработчик кнопки из меню
+@router.callback_query(F.data == "admin_pending_questions", F.func(is_admin_cb))
+async def cb_pending_questions(callback: CallbackQuery):
+    await callback.answer("Загружаю...")
+    await show_pending_questions_list(callback.message)
